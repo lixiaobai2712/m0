@@ -1403,8 +1403,11 @@ void CarApp_RunCycle(void)
                 track_state_started_ms = app_time_ms;
                 UartQueue("# BALANCE CAM ONLINE; SET ORIGIN PENDING");
             } else if ((uint32_t)(app_time_ms - track_state_started_ms) >=
-                5000U) {
+                10000U) {
                 StopBallBalance("# BALANCE TIMEOUT; CAMERA NOT FOUND");
+            } else if ((app_time_ms % 2000U) == 0U) {
+                /* Camera may need a retry — resend start every 2 s. */
+                Camera_Start();
             }
         } else if (track_start_state == TRACK_START_WAIT_ORIGIN &&
             (uint32_t)(app_time_ms - track_state_started_ms) >=
