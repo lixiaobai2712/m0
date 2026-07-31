@@ -133,7 +133,7 @@ static void StartBallBalance(void)
 {
     step_test_mode = false;
     Camera_Start();
-    Stepper_Wake();                        /* non-blocking motor wake */
+    Stepper_BlockingWake();                        /* blocking TX for reliability */
     /* Reset all control state to avoid stale data from a previous run. */
     track_tilt_deg       = 0;
     track_prev_ball_x    = 0;
@@ -1412,17 +1412,19 @@ void CarApp_RunCycle(void)
         } else if (track_start_state == TRACK_START_WAIT_ORIGIN &&
             (uint32_t)(app_time_ms - track_state_started_ms) >=
                 CAR_TRACK_START_DELAY_MS) {
-            /* The rod must be manually level when K1 starts this sequence. */
-            Stepper_SetOrigin();
+            /* Set origin at the mechanical midpoint so the motor can
+               rotate both ways (±5°).  The rod must be physically
+               positioned at mid-travel when this runs. */
+            Stepper_BlockingSetOrigin();
             track_start_state = TRACK_START_WAIT_CONTROL;
             track_state_started_ms = app_time_ms;
-            UartQueue("# BALANCE ORIGIN SET");
+            UartQueue("# BALANCE ORIGIN SET (rod at mid-travel?)");
         } else if (track_start_state == TRACK_START_WAIT_CONTROL &&
             (uint32_t)(app_time_ms - track_state_started_ms) >=
                 CAR_TRACK_ORIGIN_DELAY_MS) {
             track_start_state = TRACK_START_IDLE;
             track_last_adjust_ms = app_time_ms;
-            Stepper_AbsoluteRotate(0);
+            Stepper_BlockingAbsoluteTest(0);   /* blocking TX, reliable */
             UartQueue("# BALANCE ACTIVE");
         } else if (track_start_state == TRACK_START_IDLE &&
             (uint32_t)(app_time_ms - track_last_adjust_ms) >=
