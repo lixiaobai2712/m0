@@ -1502,19 +1502,20 @@ void CarApp_RunCycle(void)
                 /* ---- 5. Integral term (steady-state correction) ---- */
                 if (track_ki_divisor > 0) {
                     int16_t abs_x = (x < 0) ? (int16_t)(-x) : x;
-                    int16_t abs_vel = (track_ball_velocity < 0) ?
-                        (int16_t)(-track_ball_velocity) : track_ball_velocity;
 
-                    /* Only integrate when ball is reasonably centered and
-                       slow — prevents windup during large transients. */
-                    if (abs_x < 64 && abs_vel < 8) {
+                    /* Integrate whenever ball is outside deadband (error
+                       exists).  Anti-windup clamp prevents runaway.
+                       Leak only when ball is centered and controller is
+                       satisfied — this lets the integral decay naturally
+                       after the error is eliminated. */
+                    if (abs_x > CAR_TRACK_DEADBAND) {
                         track_error_integral += (int32_t)x;
                         if (track_error_integral > CAR_TRACK_INTEGRAL_MAX)
                             track_error_integral = CAR_TRACK_INTEGRAL_MAX;
                         else if (track_error_integral < -CAR_TRACK_INTEGRAL_MAX)
                             track_error_integral = -CAR_TRACK_INTEGRAL_MAX;
                     } else {
-                        /* Leaky integrator: slowly decay when not integrating */
+                        /* Leaky integrator: slowly decay in deadband */
                         track_error_integral =
                             track_error_integral * 15L / 16L;
                     }
