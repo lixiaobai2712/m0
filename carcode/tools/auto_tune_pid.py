@@ -134,21 +134,22 @@ class PIDTuner:
             lines = self.send("TRACK?")
             for line in lines:
                 print(f"  {line}")
-                m = re.search(r'KP=(\d+).*KD=(\d+).*KI=(\d+).*MX=(\d+)', line)
-                if m:
-                    self.kp = int(m.group(1))
-                    self.kd = int(m.group(2))
-                    self.ki = int(m.group(3))
-                    self.max_tilt = int(m.group(4))
+                # Parse each field independently (order varies)
+                m_kp = re.search(r'KP=(\d+)', line)
+                m_kd = re.search(r'KD=(\d+)', line)
+                m_ki = re.search(r'KI=(\d+)', line)
+                m_mx = re.search(r'MX=(\d+)', line)
+                if m_kp and m_kd and m_ki:
+                    self.kp = int(m_kp.group(1))
+                    self.kd = int(m_kd.group(1))
+                    self.ki = int(m_ki.group(1))
+                    self.max_tilt = int(m_mx.group(1)) if m_mx else 20
                     print(f"  Current: KP={self.kp} KD={self.kd} KI={self.ki} MX={self.max_tilt}")
                     return True
             if attempt < 2:
                 print(f"  Retry {attempt+2}/3...")
                 time.sleep(1)
         print("  WARNING: could not parse TRACK? response after 3 attempts")
-        print("  Raw lines received:")
-        for line in self._read_raw(1.0):
-            print(f"    |{line}|")
         return False
 
     def set_kp(self, val):
