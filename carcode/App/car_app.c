@@ -134,6 +134,12 @@ static void StartBallBalance(void)
     step_test_mode = false;
     Camera_Start();
     Stepper_Wake();                        /* non-blocking motor wake */
+    /* Reset all control state to avoid stale data from a previous run. */
+    track_tilt_deg       = 0;
+    track_prev_ball_x    = 0;
+    track_ball_velocity  = 0;
+    track_error_integral = 0;
+    track_ball_lost_ms   = 0U;
     track_mode = true;
     track_start_state = TRACK_START_WAIT_CAMERA;
     track_state_started_ms = app_time_ms;
@@ -1514,8 +1520,10 @@ void CarApp_RunCycle(void)
                 /* Use relative rotation to avoid multi-turn wrap-around
                    that occurs with AbsoluteRotate(0) after crossing a
                    full revolution. */
+                /* Use blocking TX (same path as K2/K3) instead of
+                   queue_frame to avoid "ERR: Header not found". */
                 int16_t delta = (int16_t)(target_deg - track_tilt_deg);
-                Stepper_RelativeRotate((int32_t)delta);
+                Stepper_BlockingRelativeTest((int32_t)delta);
                 track_tilt_deg = target_deg;
             }
             track_last_adjust_ms = app_time_ms;
@@ -1588,20 +1596,23 @@ void CarApp_RunCycle(void)
 #endif
     }
     if (Key_K2Pressed()) {
-        /* Manual direction calibration: absolute +5 degrees from the
-         * horizontal origin established by K1/PB13. */
+        /* Manual direction calibration: relative +1 degree.
+         * In TRACK mode: adjust the internal tilt tracking so the control
+         * loop stays in sync with the real motor position. */
 #if CAR_TRACK_ENABLE
-        track_mode = false;
-        track_start_state = TRACK_START_IDLE;
+        if (track_mode) {
+            track_tilt_deg = (int16_t)(track_tilt_deg + CAR_TRACK_CAL_ANGLE_DEG);
+        }
 #endif
         Stepper_BlockingRelativeTest(CAR_TRACK_CAL_ANGLE_DEG);
         UartQueue("# K2 RELATIVE +1 DEG");
     }
     if (Key_K3Pressed()) {
-        /* Manual direction calibration: absolute -5 degrees. */
+        /* Manual direction calibration: relative -1 degree. */
 #if CAR_TRACK_ENABLE
-        track_mode = false;
-        track_start_state = TRACK_START_IDLE;
+        if (track_mode) {
+            track_tilt_deg = (int16_t)(track_tilt_deg - CAR_TRACK_CAL_ANGLE_DEG);
+        }
 #endif
         Stepper_BlockingRelativeTest(-CAR_TRACK_CAL_ANGLE_DEG);
         UartQueue("# K3 RELATIVE -1 DEG");
