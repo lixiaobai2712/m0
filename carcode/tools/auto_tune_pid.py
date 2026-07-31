@@ -263,11 +263,21 @@ class PIDTuner:
         print(f" {len(data)} samples", end='')
         if data:
             xs = [d['x'] for d in data]
-            print(f"  X:[{min(xs)}..{max(xs)}]")
+            ts = [d['tilt'] for d in data]
+            vs = [d['vel'] for d in data]
+            print(f"  X:[{min(xs)}..{max(xs)}]"
+                  f"  TILT:[{min(ts)}..{max(ts)}]"
+                  f"  VEL:[{min(vs)}..{max(vs)}]")
+            # Print first and last DBG sample for debugging
+            if len(data) >= 2:
+                d0 = data[0]
+                d1 = data[-1]
+                print(f"    first: X={d0['x']} TILT={d0['tilt']} VEL={d0['vel']} INT={d0['integral']}")
+                print(f"    last:  X={d1['x']} TILT={d1['tilt']} VEL={d1['vel']} INT={d1['integral']}")
         elif other_lines:
-            print(f"  (other lines: {len(other_lines)}, e.g. {other_lines[0][:60]})")
+            print(f"  (other: {len(other_lines)}, e.g. {other_lines[0][:80]})")
         else:
-            print("  (no data at all — is TRACK DEBUG ON?)")
+            print("  (no data — is TRACK DEBUG ON?)")
         self.round_data = data
         return data
 
