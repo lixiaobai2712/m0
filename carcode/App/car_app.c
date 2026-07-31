@@ -99,6 +99,7 @@ static int16_t track_ki_divisor;
 static int16_t track_prev_ball_x;
 static int16_t track_ball_velocity;
 static int32_t track_error_integral;
+static bool    track_ball_was_lost;     /* true when ball was lost last cycle */
 #endif
 static bool    step_test_mode;
 static int32_t step_test_last_ms;
@@ -141,6 +142,7 @@ static void StartBallBalance(void)
     track_ball_velocity  = 0;
     track_error_integral = 0;
     track_ball_lost_ms   = 0U;
+    track_ball_was_lost  = true;
     track_mode = true;
     track_start_state = TRACK_START_WAIT_CAMERA;
     track_state_started_ms = app_time_ms;
@@ -1389,6 +1391,7 @@ void CarApp_Init(void)
     track_prev_ball_x  = 0;
     track_ball_velocity = 0;
     track_error_integral = 0;
+    track_ball_was_lost = true;
 #endif
     step_test_mode = false;
     step_test_last_ms = 0;
@@ -1462,12 +1465,21 @@ void CarApp_RunCycle(void)
 
                 /* ---- 1. Estimate ball velocity (low-pass filtered) ---- */
                 {
-                    int16_t raw_vel = (int16_t)(x - track_prev_ball_x);
-                    int16_t filt   = track_ball_velocity;
-                    track_ball_velocity = (int16_t)(
-                        (raw_vel + filt * ((1 << CAR_TRACK_KD_FILTER_SHIFT) - 1))
-                        >> CAR_TRACK_KD_FILTER_SHIFT);
-                    track_prev_ball_x = x;
+                    /* On first detection after init or after losing the ball,
+                       seed prev_ball_x with the current position to avoid a
+                       fake velocity spike (prev was 0, ball might be at X=100). */
+                    if (track_ball_was_lost) {
+                        track_prev_ball_x  = x;
+                        track_ball_velocity = 0;
+                        track_ball_was_lost = false;
+                    } else {
+                        int16_t raw_vel = (int16_t)(x - track_prev_ball_x);
+                        int16_t filt   = track_ball_velocity;
+                        track_ball_velocity = (int16_t)(
+                            (raw_vel + filt * ((1 << CAR_TRACK_KD_FILTER_SHIFT) - 1))
+                            >> CAR_TRACK_KD_FILTER_SHIFT);
+                        track_prev_ball_x = x;
+                    }
                 }
 
                 /* ---- 2. Proportional term with adaptive gain ---- */
@@ -1534,6 +1546,7 @@ void CarApp_RunCycle(void)
                 /* Ball lost — reset integral and velocity. */
                 track_error_integral = 0;
                 track_ball_velocity  = 0;
+                track_ball_was_lost  = true;
 
                 if (track_tilt_deg != 0) {
                     if (track_ball_lost_ms == 0U) {
