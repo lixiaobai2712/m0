@@ -122,6 +122,15 @@ static void queue_frame(uint8_t cmd, const uint8_t *data, uint8_t len)
         }
     }
 
+    /*
+     * Wait for the last byte to leave the shift register, then insert a
+     * ~870 µs inter-frame gap (10 byte-times @ 115200).  Without this gap
+     * the motor may treat back-to-back frames as one continuous stream and
+     * respond with "ERR: Header not found".
+     */
+    while (DL_UART_Main_isBusy(STEPPER_UART_INST)) {}
+    delay_cycles(27840U);    /* 870 µs @ 32 MHz (10 × 87 µs byte-time) */
+
     /* Build hex dump for Bluetooth debugging. */
     {
         static const char hex[] = "0123456789ABCDEF";
@@ -558,6 +567,10 @@ void Stepper_SendRawBytes(const uint8_t *bytes, uint8_t len)
             tx_idx++;
         }
     }
+
+    /* Inter-frame gap — see queue_frame() for rationale. */
+    while (DL_UART_Main_isBusy(STEPPER_UART_INST)) {}
+    delay_cycles(27840U);
 
     /* Build hex dump for debugging. */
     pos = 0U;

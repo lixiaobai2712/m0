@@ -15,12 +15,29 @@
 #define CAR_CAMERA_MAX_CORRECTION   20
 
 /* Stepper-based ball balancing. The motor's internal encoder closes the
-   angle loop; the MCU maps the predicted ball position to an absolute tilt. */
+   angle loop; the MCU maps the predicted ball position to an absolute tilt.
+
+   PD + I control with soft deadband and adaptive KP.
+
+   target_deg = MOTOR_SIGN * (P + D + I) / 100
+     P = ball_x * 100 / kp_divisor          — proportional (position error)
+     D = ball_velocity * 100 / kd_divisor   — derivative (damping)
+     I = error_integral * 100 / ki_divisor  — integral (steady-state correction)
+
+   The sign convention: MOTOR_SIGN = -1 when a positive stepper angle
+   lowers the free end of the rod.  Positive camera X = ball towards
+   the free end. */
 #define CAR_TRACK_ENABLE            1U
-#define CAR_TRACK_DEADBAND           8
-#define CAR_TRACK_KP_DIVISOR        64L
+#define CAR_TRACK_DEADBAND           4      /* soft deadband: linear taper below this */
+#define CAR_TRACK_KP_DIVISOR        32L    /* P gain divisor (px→deg, smaller=stronger) */
+#define CAR_TRACK_KD_DIVISOR        8L     /* D gain divisor (vel px/cycle→deg damping) */
+#define CAR_TRACK_KI_DIVISOR        64L    /* I gain divisor (0 = disable integral) */
+#define CAR_TRACK_INTEGRAL_MAX      4000L  /* anti-windup: max integral accumulator */
+#define CAR_TRACK_KD_FILTER_SHIFT   2      /* velocity LPF: 1/4 new + 3/4 old */
+#define CAR_TRACK_ADAPTIVE_FAST_ZONE 96    /* |x| above this: KP boosted +30% */
+#define CAR_TRACK_ADAPTIVE_SLOW_ZONE 24    /* |x| below this: KP reduced -30% */
 #define CAR_TRACK_MAX_TILT_DEG       5
-#define CAR_TRACK_UPDATE_MS         80U
+#define CAR_TRACK_UPDATE_MS         40U    /* control loop period (was 80ms) */
 #define CAR_TRACK_ORIGIN_DELAY_MS   120U
 #define CAR_TRACK_START_DELAY_MS    120U
 /* Set to -1 if a positive absolute angle lowers the rod's free end. */
