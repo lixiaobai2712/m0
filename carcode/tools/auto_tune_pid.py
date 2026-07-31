@@ -153,14 +153,17 @@ class PIDTuner:
         return False
 
     def set_kp(self, val):
+        val = max(val, KP_RANGE[0])  # never send 0 (division by zero on MCU)
         self.kp = val
         self.send(f"TRACK KP {val}")
 
     def set_kd(self, val):
+        val = max(val, 1)
         self.kd = val
         self.send(f"TRACK KD {val}")
 
     def set_ki(self, val):
+        val = max(val, 0)
         self.ki = val
         self.send(f"TRACK KI {val}")
 
@@ -334,49 +337,85 @@ class PIDTuner:
         }
 
     # ─── Tuning logic ───────────────────────────────────────────────────
+    #
+    # IMPORTANT: our system uses DIVISOR parameters.
+    #   target = ball_x * 100 / KP_divisor
+    # A SMALLER divisor = STRONGER response (more degrees per pixel).
+    # A LARGER  divisor = WEAKER response.
+    #
+    # Tuning rules for ball-on-plate:
+    #   - Ball oscillates (crosses center frequently): KD too weak →
+    #     decrease KD divisor (stronger damping)
+    #   - Ball can't reach center, stuck at edge despite max tilt:
+    #     mechanical/sign problem, or KP too weak → decrease KP divisor
+    #   - Ball overshoots and gets stuck on other side: too much momentum,
+    #     KD too weak → decrease KD divisor
+    #   - Integral windup: KI accumulating too fast → increase KI divisor
 
     def suggest(self, metrics):
-        """Return (param, new_value) or None if no change needed."""
+        """Return list of (param, new_value, reason) tuples."""
         m = metrics
         changes = []
 
-        # Priority 1: SEVERE oscillation → reduce KP, increase KD
+        # Priority 1: SEVERE oscillation → much stronger damping
         if m['osc_score'] > 50:
-            new_kp = max(int(self.kp * 0.7), KP_RANGE[0])
-            changes.append(('KP', new_kp, f"severe oscillation ({m['osc_score']:.0f})"))
-            new_kd = min(int(self.kd * 1.5), KD_RANGE[1])
-            changes.append(('KD', new_kd, f"increase damping"))
+            new_kd = max(int(self.kd * 0.5), 1)   # half the divisor = 2x damping
+            changes.append(('KD', new_kd,
+                f"severe oscillation ({m['osc_score']:.0f}/100) → stronger damping"))
+            # Also back off KP a bit to reduce overshoot
+            if self.kp < 64:
+                new_kp = min(int(self.kp * 1.3), KP_RANGE[1])
+                changes.append(('KP', new_kp,
+                    f"reduce gain to match damping"))
 
-        # Priority 2: moderate oscillation
+        # Priority 2: moderate oscillation → stronger damping
         elif m['osc_score'] > 25:
-            new_kd = min(int(self.kd * 1.3), KD_RANGE[1])
-            changes.append(('KD', new_kd, f"moderate oscillation ({m['osc_score']:.0f})"))
+            new_kd = max(int(self.kd * 0.7), 1)
+            changes.append(('KD', new_kd,
+                f"moderate oscillation ({m['osc_score']:.0f}/100) → stronger damping"))
 
-        # Priority 3: large tracking error → increase KP
-        if m['dev_score'] > 40 and not changes:
-            new_kp = min(int(self.kp * 0.85), KP_RANGE[1])  # smaller divisor = stronger
-            changes.append(('KP', new_kp, f"large deviation ({m['dev_score']:.0f})"))
+        # Priority 3: saturated at max tilt + ball not centered →
+        #             response is too weak, make KP stronger (smaller divisor)
+        if m['sat_score'] > 60 and m['mean_abs'] > 20 and not changes:
+            new_kp = max(int(self.kp * 0.7), KP_RANGE[0])
+            changes.append(('KP', new_kp,
+                f"saturated {m['sat_score']:.0f}%, ball at {m['mean_abs']:.0f}px"
+                f" → stronger KP"))
 
-        # Priority 4: slow settling → increase KD
-        if m['tail_score'] > 30 and not changes:
-            new_kd = min(int(self.kd * 1.2), KD_RANGE[1])
-            changes.append(('KD', new_kd, f"slow settling ({m['tail_score']:.0f})"))
-
-        # Priority 5: integral windup → reduce KI or increase anti-windup
+        # Priority 4: integral windup → slower integral (larger divisor)
         if m['integral_winding'] and not changes:
-            new_ki = max(int(self.ki * 0.7), KI_RANGE[0])
-            changes.append(('KI', new_ki, "integral windup"))
+            new_ki = min(int(self.ki * 1.3), KI_RANGE[1])
+            changes.append(('KI', new_ki, "integral windup → slower I"))
 
-        # Priority 6: steady error but no oscillation → increase KI
-        if m['mean_abs'] > 20 and m['osc_score'] < 15 and not changes:
-            new_ki = max(int(self.ki * 0.8), 4)  # smaller = stronger integral
-            changes.append(('KI', new_ki, f"steady error ({m['mean_abs']:.1f}px)"))
+        # Priority 5: steady error but no oscillation → stronger KP
+        if m['mean_abs'] > 30 and m['osc_score'] < 15 and not changes:
+            new_kp = max(int(self.kp * 0.8), KP_RANGE[0])
+            changes.append(('KP', new_kp,
+                f"steady error {m['mean_abs']:.0f}px → stronger KP"))
 
-        # Priority 7: everything looks good → try reducing KD for responsiveness
-        if not changes and m['health'] > 60:
-            if self.kd < KD_RANGE[1] * 0.8:
-                new_kd = min(int(self.kd * 1.1), KD_RANGE[1])
-                changes.append(('KD', new_kd, "fine-tune: relax damping"))
+        # Safety: clamp values to valid ranges
+        clamped = []
+        for p, v, r in changes:
+            if p == 'KP':
+                v = max(v, KP_RANGE[0])
+            elif p == 'KD':
+                v = max(v, 1)
+            elif p == 'KI':
+                v = max(v, 0)
+            clamped.append((p, v, r))
+        changes = clamped
+
+        # Filter: don't change if same as current
+        changes = [(p, v, r) for p, v, r in changes
+                   if (p == 'KP' and v != self.kp) or
+                      (p == 'KD' and v != self.kd) or
+                      (p == 'KI' and v != self.ki)]
+
+        if not changes and m['health'] < 50:
+            # Stuck: try a different approach — reset KI
+            if self.ki > 0 and m['sat_score'] > 80:
+                changes.append(('KI', 0,
+                    "stuck and saturated → disable integral temporarily"))
 
         return changes
 
