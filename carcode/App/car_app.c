@@ -1422,9 +1422,12 @@ void CarApp_RunCycle(void)
         } else if (track_start_state == TRACK_START_WAIT_CONTROL &&
             (uint32_t)(app_time_ms - track_state_started_ms) >=
                 CAR_TRACK_ORIGIN_DELAY_MS) {
+            /* Origin already set; motor is at position 0.
+               No AbsoluteRotate(0) needed — it would just be a no-op,
+               and the sync bytes in BlockingAbsoluteTest would reset
+               the motor's parser causing spurious full-revolution moves. */
             track_start_state = TRACK_START_IDLE;
             track_last_adjust_ms = app_time_ms;
-            Stepper_BlockingAbsoluteTest(0);   /* blocking TX, reliable */
             UartQueue("# BALANCE ACTIVE");
         } else if (track_start_state == TRACK_START_IDLE &&
             (uint32_t)(app_time_ms - track_last_adjust_ms) >=
