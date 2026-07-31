@@ -167,17 +167,35 @@ class PIDTuner:
     def start_track(self):
         """Start TRACK mode and wait for active control."""
         self.drain()
-        lines = self.send("TRACK START")
-        # Wait for BALANCE ACTIVE
-        deadline = time.time() + 30
+        # Send TRACK START without draining the initial response
+        self.ser.write(b"TRACK START\r\n")
+        print("  >>> TRACK START")
+        time.sleep(0.3)
+
+        # Continuously read until BALANCE ACTIVE or timeout
+        deadline = time.time() + 35  # camera timeout is 10s, be generous
+        last_dot = time.time()
         while time.time() < deadline:
-            for line in self.read_response(timeout=0.5):
-                print(f"  {line}")
-                if "BALANCE ACTIVE" in line:
-                    return True
-                if "TIMEOUT" in line or "ERROR" in line:
-                    return False
-            time.sleep(0.2)
+            if self.ser.in_waiting:
+                try:
+                    raw = self.ser.readline()
+                    line = raw.decode('utf-8', errors='replace').strip()
+                    if line:
+                        print(f"  {line}")
+                        if "BALANCE ACTIVE" in line:
+                            return True
+                        if "TIMEOUT" in line:
+                            print("  ! TRACK reported timeout")
+                            return False
+                        last_dot = time.time()
+                except Exception:
+                    pass
+            else:
+                time.sleep(0.05)
+                # Print a dot every 2s to show we're alive
+                if time.time() - last_dot > 2:
+                    print("  .")
+                    last_dot = time.time()
         return False
 
     def stop_track(self):
