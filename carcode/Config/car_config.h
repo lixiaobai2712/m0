@@ -30,15 +30,14 @@
 #define CAR_TRACK_ENABLE            1U
 #define CAR_TRACK_DEADBAND           4      /* soft deadband: linear taper below this */
 #define CAR_TRACK_KP_DIVISOR        32L    /* P gain divisor (px→deg, smaller=stronger) */
-#define CAR_TRACK_KD_DIVISOR        8L     /* D gain divisor (vel px/cycle→deg damping) */
+#define CAR_TRACK_KD_DIVISOR        4L     /* D gain divisor (vel px/cycle→deg damping) */
 #define CAR_TRACK_KI_DIVISOR        64L    /* I gain divisor (0 = disable integral) */
 #define CAR_TRACK_INTEGRAL_MAX      4000L  /* anti-windup: max integral accumulator */
 #define CAR_TRACK_KD_FILTER_SHIFT   2      /* velocity LPF: 1/4 new + 3/4 old */
 #define CAR_TRACK_ADAPTIVE_FAST_ZONE 96    /* |x| above this: KP boosted +30% */
 #define CAR_TRACK_ADAPTIVE_SLOW_ZONE 24    /* |x| below this: KP reduced -30% */
-#define CAR_TRACK_MAX_TILT_LIMIT     20     /* hard upper limit, safety */
-#define CAR_TRACK_MAX_TILT_DEFAULT   10     /* default after init */
-#define CAR_TRACK_UPDATE_MS         40U    /* control loop period (was 80ms) */
+#define CAR_TRACK_MAX_TILT_DEG       20     /* hard limit, mechanical max +47° */
+#define CAR_TRACK_UPDATE_MS         20U    /* control loop period */
 #define CAR_TRACK_ORIGIN_DELAY_MS   120U
 #define CAR_TRACK_START_DELAY_MS    120U
 /* Set to -1 if a positive absolute angle lowers the rod's free end. */
