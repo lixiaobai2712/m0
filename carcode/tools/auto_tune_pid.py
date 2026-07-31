@@ -48,38 +48,47 @@ GOOD_HEALTH = 75              # stop if health >= this for 3 consecutive rounds
 
 
 class PIDTuner:
-    def __init__(self, port, baud=DEFAULT_BAUD, dry_run=False):
+    def __init__(self, port, baud=DEFAULT_BAUD, dry_run=False, debug=False):
         self.port = port
         self.baud = baud
         self.dry_run = dry_run
+        self.debug = debug
         self.ser = None
         self.kp = None
         self.kd = None
         self.ki = None
         self.max_tilt = None
-        self.round_data = []   # list of (timestamp, ball_x, tilt, vel, integral)
+        self.round_data = []
 
     # ─── Serial helpers ────────────────────────────────────────────────
 
     def connect(self):
         print(f"Connecting to {self.port} @ {self.baud}...")
-        self.ser = serial.Serial(self.port, self.baud, timeout=1)
-        time.sleep(1)
+        self.ser = serial.Serial(self.port, self.baud, timeout=0.5)
+        self.ser.dtr = False
+        self.ser.rts = False
+        # Bluetooth modules need time to sync after DTR toggle
+        time.sleep(2)
         self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
+        print("  Connected, waiting for MCU...")
+        # Send a harmless query to wake up the link
+        for attempt in range(5):
+            self.ser.write(b"\r\n")
+            time.sleep(0.3)
+            # Check if we got any response
+            junk = self._read_raw(0.5)
+            if any('# ERROR' in l or 'TRACK' in l or 'GYRO' in l or 'CAM' in l for l in junk):
+                print(f"  MCU responding (attempt {attempt+1})")
+                break
+        else:
+            print("  WARNING: no response from MCU — check port/power")
+        self.drain()
 
-    def send(self, cmd):
-        """Send a command and return the response line(s)."""
-        full = cmd + "\r\n"
-        if not self.dry_run:
-            self.ser.write(full.encode())
-        print(f"  >>> {cmd}")
-        time.sleep(0.15)
-        return self.read_response()
-
-    def read_response(self, timeout=2.0):
-        """Read all available lines, return as list."""
+    def _read_raw(self, timeout_s=0.5):
+        """Read all available lines without filtering, for debugging."""
         lines = []
-        deadline = time.time() + timeout
+        deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self.ser.in_waiting:
                 try:
@@ -93,6 +102,25 @@ class PIDTuner:
                 time.sleep(0.02)
         return lines
 
+    def send(self, cmd):
+        """Send a command and return the response line(s)."""
+        full = cmd + "\r\n"
+        self.ser.reset_input_buffer()
+        if not self.dry_run:
+            self.ser.write(full.encode())
+        if self.debug:
+            print(f"  >>> {cmd}")
+        time.sleep(0.3)  # Bluetooth needs more latency
+        return self.read_response()
+
+    def read_response(self, timeout=2.0):
+        """Read all available lines, return as list."""
+        lines = self._read_raw(timeout)
+        if self.debug:
+            for l in lines:
+                print(f"       {l}")
+        return lines
+
     def drain(self):
         """Discard buffered serial data."""
         self.ser.reset_input_buffer()
@@ -101,18 +129,26 @@ class PIDTuner:
     # ─── High-level commands ───────────────────────────────────────────
 
     def read_params(self):
-        """Parse KP/KD/KI/MAXTILT from TRACK? response."""
-        lines = self.send("TRACK?")
-        for line in lines:
-            m = re.search(r'KP=(\d+).*KD=(\d+).*KI=(\d+).*MX=(\d+)', line)
-            if m:
-                self.kp = int(m.group(1))
-                self.kd = int(m.group(2))
-                self.ki = int(m.group(3))
-                self.max_tilt = int(m.group(4))
-                print(f"  Current: KP={self.kp} KD={self.kd} KI={self.ki} MX={self.max_tilt}")
-                return True
-        print("  WARNING: could not parse TRACK? response")
+        """Parse KP/KD/KI/MAXTILT from TRACK? response. Retries on failure."""
+        for attempt in range(3):
+            lines = self.send("TRACK?")
+            for line in lines:
+                print(f"  {line}")
+                m = re.search(r'KP=(\d+).*KD=(\d+).*KI=(\d+).*MX=(\d+)', line)
+                if m:
+                    self.kp = int(m.group(1))
+                    self.kd = int(m.group(2))
+                    self.ki = int(m.group(3))
+                    self.max_tilt = int(m.group(4))
+                    print(f"  Current: KP={self.kp} KD={self.kd} KI={self.ki} MX={self.max_tilt}")
+                    return True
+            if attempt < 2:
+                print(f"  Retry {attempt+2}/3...")
+                time.sleep(1)
+        print("  WARNING: could not parse TRACK? response after 3 attempts")
+        print("  Raw lines received:")
+        for line in self._read_raw(1.0):
+            print(f"    |{line}|")
         return False
 
     def set_kp(self, val):
@@ -431,6 +467,8 @@ def main():
                         help=f"Max tuning rounds (default: {MAX_ROUNDS})")
     parser.add_argument("--dry-run", action="store_true",
                         help="Don't send commands, just read and log")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print all raw serial data")
     parser.add_argument("--list", action="store_true",
                         help="List COM ports and exit")
     args = parser.parse_args()
@@ -444,7 +482,7 @@ def main():
         print("\nUsage: python auto_tune_pid.py <COM_PORT>")
         return
 
-    tuner = PIDTuner(args.port, args.baud, dry_run=args.dry_run)
+    tuner = PIDTuner(args.port, args.baud, dry_run=args.dry_run, debug=args.debug)
     try:
         tuner.run(rounds=args.rounds)
     except KeyboardInterrupt:
