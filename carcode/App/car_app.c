@@ -89,16 +89,17 @@ static bool    track_mode;
 static uint8_t track_start_state;
 static uint32_t track_state_started_ms;
 static uint32_t track_last_adjust_ms;
-static int16_t track_tilt_deg;
-static int16_t track_kp_divisor;
+static int16_t track_tilt_cdeg;          /* current tilt in centi-degrees */
+static int16_t track_kp_pos;             /* KP position gain (×100) */
+static int16_t track_kp_vel;             /* KP velocity gain (×100) */
+static int16_t track_ki_divisor;         /* I gain divisor (0=off) */
 static bool    track_debug;
 static uint32_t track_ball_lost_ms;
-static int16_t track_kd_divisor;
-static int16_t track_ki_divisor;
 static int16_t track_prev_ball_x;
-static int16_t track_ball_velocity;
-static int32_t track_error_integral;
-static bool    track_ball_was_lost;     /* true when ball was lost last cycle */
+static int16_t track_ball_velocity;      /* filtered vel [px/cycle] */
+static int32_t track_error_integral;     /* px·cycles */
+static bool    track_ball_was_lost;
+static bool    track_output_saturated;   /* true when angle was clamped */
 #endif
 static bool    step_test_mode;
 static int32_t step_test_last_ms;
@@ -122,10 +123,10 @@ static void StopBallBalance(const char *message)
     track_mode = false;
     track_start_state = TRACK_START_IDLE;
     /* Return to level using relative rotation (avoid multi-turn wrap). */
-    if (track_tilt_deg != 0) {
-        Stepper_RelativeRotate((int32_t)(-track_tilt_deg));
+    if (track_tilt_cdeg != 0) {
+        Stepper_RelativeRotate((int32_t)(-track_tilt_cdeg / 100));
     }
-    track_tilt_deg = 0;
+    track_tilt_cdeg = 0;
     Camera_Stop();
     UartQueue(message);
 }
@@ -136,7 +137,7 @@ static void StartBallBalance(void)
     Camera_Start();
     Stepper_BlockingWake();                        /* blocking TX for reliability */
     /* Reset all control state to avoid stale data from a previous run. */
-    track_tilt_deg       = 0;
+    track_tilt_cdeg       = 0;
     track_prev_ball_x    = 0;
     track_ball_velocity  = 0;
     track_error_integral = 0;
@@ -1046,19 +1047,20 @@ static void ProcessCommand(void)
     } else if (strcmp(rx_line, "TRACK?") == 0) {
 #if CAR_TRACK_ENABLE
         snprintf(tx_buffer, sizeof(tx_buffer),
-            "# TRACK MODE=%u ST=%u ONLINE=%u BALL=%u X=%d TILT=%d MX=%d KP=%d KD=%d KI=%d VEL=%d INT=%ld CD=%lu\r\n",
+            "# TRACK MODE=%u ST=%u ONLINE=%u BALL=%u X=%d TILT=%d MX=%d KPP=%d KPV=%d KI=%d VEL=%d INT=%ld SAT=%u CD=%lu\r\n",
             track_mode ? 1U : 0U,
             track_start_state,
             Camera_IsOnline(app_time_ms) ? 1U : 0U,
             Camera_HasBall() ? 1U : 0U,
             Camera_GetBallX(),
-            track_tilt_deg,
-            CAR_TRACK_MAX_TILT_DEG,
-            track_kp_divisor,
-            track_kd_divisor,
+            track_tilt_cdeg / 100,         /* degrees from centi-degrees */
+            CAR_TRACK_MAX_TILT_CDEG / 100,
+            track_kp_pos,
+            track_kp_vel,
             track_ki_divisor,
             track_ball_velocity,
             (long)track_error_integral,
+            track_output_saturated ? 1U : 0U,
             track_last_adjust_ms == 0 ? 0UL :
                 (unsigned long)(app_time_ms -
                     (uint32_t)track_last_adjust_ms));
@@ -1084,7 +1086,7 @@ static void ProcessCommand(void)
         if (end == &rx_line[9] || *end != '\0' || val < 1 || val > 200) {
             UartQueue("# TRACK KP ERROR RANGE 1..200");
         } else {
-            track_kp_divisor = (int16_t)val;
+            track_kp_pos = (int16_t)val;
             snprintf(tx_buffer, sizeof(tx_buffer),
                 "# TRACK KP SET TO %ld\r\n", val);
             tx_length = (uint8_t)strlen(tx_buffer);
@@ -1093,16 +1095,16 @@ static void ProcessCommand(void)
 #else
         UartQueue("# TRACK DISABLED IN CONFIG");
 #endif
-    } else if (strncmp(rx_line, "TRACK KD ", 9) == 0) {
+    } else if (strncmp(rx_line, "TRACK KPV ", 10) == 0) {
 #if CAR_TRACK_ENABLE
         char *end;
-        long val = strtol(&rx_line[9], &end, 10);
-        if (end == &rx_line[9] || *end != '\0' || val < 1 || val > 200) {
-            UartQueue("# TRACK KD ERROR RANGE 1..200");
+        long val = strtol(&rx_line[10], &end, 10);
+        if (end == &rx_line[10] || *end != '\0' || val < 1 || val > 2000) {
+            UartQueue("# TRACK KPV ERROR RANGE 1..2000");
         } else {
-            track_kd_divisor = (int16_t)val;
+            track_kp_vel = (int16_t)val;
             snprintf(tx_buffer, sizeof(tx_buffer),
-                "# TRACK KD SET TO %ld\r\n", val);
+                "# TRACK KPV SET TO %ld\r\n", val);
             tx_length = (uint8_t)strlen(tx_buffer);
             tx_index = 0U;
         }
@@ -1128,9 +1130,9 @@ static void ProcessCommand(void)
     } else if (strcmp(rx_line, "TRACK SAVE") == 0) {
 #if CAR_TRACK_ENABLE
         snprintf(tx_buffer, sizeof(tx_buffer),
-            "# TRACK SAVE: KP=%d KD=%d KI=%d MAXTILT=%d DB=%d UPD=%lu\r\n",
-            track_kp_divisor, track_kd_divisor, track_ki_divisor,
-            CAR_TRACK_MAX_TILT_DEG, CAR_TRACK_DEADBAND,
+            "# TRACK SAVE: KPP=%d KPV=%d KI=%d MAXTILT=%d DBpx=%d UPD=%lu\r\n",
+            track_kp_pos, track_kp_vel, track_ki_divisor,
+            CAR_TRACK_MAX_TILT_CDEG / 100, CAR_TRACK_DEADBAND_PX,
             (unsigned long)CAR_TRACK_UPDATE_MS);
         tx_length = (uint8_t)strlen(tx_buffer);
         tx_index = 0U;
@@ -1252,13 +1254,13 @@ static void QueueTelemetry(void)
             (unsigned long)app_time_ms,
             ball_x,
             Camera_HasBall() ? 1U : 0U,
-            track_tilt_deg,
-            track_kp_divisor,
-            track_kd_divisor,
+            track_tilt_cdeg,
+            track_kp_pos,
+            track_kp_vel,
             track_ki_divisor,
             track_ball_velocity,
             (long)track_error_integral,
-            CAR_TRACK_MAX_TILT_DEG,
+            CAR_TRACK_MAX_TILT_CDEG,
             track_start_state,
             Camera_IsOnline(app_time_ms) ? 1U : 0U,
             track_mode ? 1U : 0U);
@@ -1361,11 +1363,11 @@ void CarApp_Init(void)
     track_start_state = TRACK_START_IDLE;
     track_state_started_ms = 0U;
     track_last_adjust_ms = 0U;
-    track_tilt_deg = 0;
-    track_kp_divisor = CAR_TRACK_KP_DIVISOR;
-    track_debug = false;
+    track_tilt_cdeg = 0;
+    track_kp_pos      = CAR_TRACK_KP_POS;
+    track_debug        = false;
     track_ball_lost_ms = 0U;
-    track_kd_divisor   = CAR_TRACK_KD_DIVISOR;
+    track_kp_vel       = CAR_TRACK_KP_VEL;
     track_ki_divisor   = CAR_TRACK_KI_DIVISOR;
     track_prev_ball_x  = 0;
     track_ball_velocity = 0;
@@ -1437,129 +1439,137 @@ void CarApp_RunCycle(void)
             (uint32_t)(app_time_ms - track_last_adjust_ms) >=
                 CAR_TRACK_UPDATE_MS) {
             int16_t x = Camera_GetBallX();
-            int16_t target_deg = 0;
+            int16_t angle_cdeg = 0;    /* target angle in centi-degrees */
 
             if (Camera_HasBall()) {
                 track_ball_lost_ms = 0U;
 
-                /* ---- 1. Estimate ball velocity (low-pass filtered) ---- */
+                /* ── 1. Estimate ball velocity (LPF) ──────────── */
+                if (track_ball_was_lost) {
+                    track_prev_ball_x  = x;
+                    track_ball_velocity = 0;
+                    track_ball_was_lost = false;
+                } else {
+                    int16_t raw_vel = (int16_t)(x - track_prev_ball_x);
+                    int16_t filt   = track_ball_velocity;
+                    track_ball_velocity = (int16_t)(
+                        (raw_vel + filt * ((1 << CAR_TRACK_VEL_FILTER_SHIFT) - 1))
+                        >> CAR_TRACK_VEL_FILTER_SHIFT);
+                    track_prev_ball_x = x;
+                }
+
+                /* ── 2. Cascade PD ─────────────────────────────
+                   Outer: position error → desired velocity
+                   Inner: velocity error → angle command        */
                 {
-                    /* On first detection after init or after losing the ball,
-                       seed prev_ball_x with the current position to avoid a
-                       fake velocity spike (prev was 0, ball might be at X=100). */
-                    if (track_ball_was_lost) {
-                        track_prev_ball_x  = x;
-                        track_ball_velocity = 0;
-                        track_ball_was_lost = false;
-                    } else {
-                        int16_t raw_vel = (int16_t)(x - track_prev_ball_x);
-                        int16_t filt   = track_ball_velocity;
-                        track_ball_velocity = (int16_t)(
-                            (raw_vel + filt * ((1 << CAR_TRACK_KD_FILTER_SHIFT) - 1))
-                            >> CAR_TRACK_KD_FILTER_SHIFT);
-                        track_prev_ball_x = x;
-                    }
-                }
-
-                /* ---- 2. Proportional term with adaptive gain ---- */
-                {
-                    int32_t p_term = (int32_t)x * 100L / track_kp_divisor;
-                    int16_t abs_x  = (x < 0) ? (int16_t)(-x) : x;
-
-                    /* Adaptive KP: stronger push when ball is far away,
-                       gentler touch when ball is near center. */
-                    if (abs_x > CAR_TRACK_ADAPTIVE_FAST_ZONE) {
-                        p_term = p_term * 13L / 10L;   /* +30 % */
-                    } else if (abs_x < CAR_TRACK_ADAPTIVE_SLOW_ZONE) {
-                        p_term = p_term * 7L / 10L;    /* -30 % */
-                    }
-
-                    /* ---- 3. Soft deadband: linear taper instead of hard cut ---- */
-                    if (abs_x <= CAR_TRACK_DEADBAND && CAR_TRACK_DEADBAND > 0) {
-                        p_term = p_term * (int32_t)abs_x /
-                                 (int32_t)CAR_TRACK_DEADBAND;
-                    }
-
-                    target_deg = (int16_t)p_term;
-                }
-
-                /* ---- 4. Derivative term (damping) ---- */
-                if (track_kd_divisor > 0) {
-                    int32_t d_term = (int32_t)track_ball_velocity * 100L /
-                                     track_kd_divisor;
-                    target_deg = (int16_t)(target_deg + d_term);
-                }
-
-                /* ---- 5. Integral term (steady-state correction) ---- */
-                if (track_ki_divisor > 0) {
                     int16_t abs_x = (x < 0) ? (int16_t)(-x) : x;
 
-                    /* Integrate whenever ball is outside deadband (error
-                       exists).  Anti-windup clamp prevents runaway.
-                       Leak only when ball is centered and controller is
-                       satisfied — this lets the integral decay naturally
-                       after the error is eliminated. */
-                    if (abs_x > CAR_TRACK_DEADBAND) {
+                    /* Soft deadband in pixels (calibrated from cm) */
+                    int32_t error = (int32_t)x;
+                    if (abs_x <= CAR_TRACK_DEADBAND_PX && CAR_TRACK_DEADBAND_PX > 0) {
+                        error = error * (int32_t)abs_x /
+                                (int32_t)CAR_TRACK_DEADBAND_PX;
+                    }
+
+                    /* Outer: desired velocity = KP_POS * position_error */
+                    int32_t desired_vel = error * track_kp_pos / 100L;
+
+                    /* Inner: angle = KP_VEL * (desired_vel - actual_vel) */
+                    int32_t vel_error = desired_vel - (int32_t)track_ball_velocity;
+                    angle_cdeg = (int16_t)(vel_error * track_kp_vel / 100L);
+                }
+
+                /* ── 3. Integral (conditional anti-windup) ─────
+                   Only accumulate when output is NOT saturated,
+                   OR when the integral would pull output back
+                   toward zero (reverse clamping).               */
+                if (track_ki_divisor > 0) {
+                    int16_t abs_x = (x < 0) ? (int16_t)(-x) : x;
+                    bool should_integrate = false;
+
+                    if (!track_output_saturated) {
+                        /* Output free: integrate normally */
+                        should_integrate = (abs_x > CAR_TRACK_DEADBAND_PX);
+                    } else {
+                        /* Output saturated: only integrate if it
+                           would pull the output back from the rail */
+                        if (track_tilt_cdeg >= CAR_TRACK_MAX_TILT_CDEG && x < 0)
+                            should_integrate = true;
+                        if (track_tilt_cdeg <= -CAR_TRACK_MAX_TILT_CDEG && x > 0)
+                            should_integrate = true;
+                    }
+
+                    if (should_integrate) {
                         track_error_integral += (int32_t)x;
                         if (track_error_integral > CAR_TRACK_INTEGRAL_MAX)
                             track_error_integral = CAR_TRACK_INTEGRAL_MAX;
                         else if (track_error_integral < -CAR_TRACK_INTEGRAL_MAX)
                             track_error_integral = -CAR_TRACK_INTEGRAL_MAX;
-                    } else {
-                        /* Leaky integrator: slowly decay in deadband */
+                    } else if (abs_x <= CAR_TRACK_DEADBAND_PX) {
+                        /* Leak when centered and not integrating */
                         track_error_integral =
                             track_error_integral * 15L / 16L;
                     }
-                    target_deg = (int16_t)(target_deg +
+                    angle_cdeg = (int16_t)(angle_cdeg +
                         track_error_integral * 100L / track_ki_divisor);
                 }
 
-                /* ---- 6. Apply motor sign and clamp ---- */
-                target_deg = (int16_t)(target_deg * CAR_TRACK_MOTOR_SIGN);
-                if (target_deg > CAR_TRACK_MAX_TILT_DEG)
-                    target_deg = CAR_TRACK_MAX_TILT_DEG;
-                else if (target_deg < -CAR_TRACK_MAX_TILT_DEG)
-                    target_deg = -CAR_TRACK_MAX_TILT_DEG;
+                /* ── 4. Clamp and apply motor sign ──────────── */
+                {
+                    int32_t clamped = (int32_t)angle_cdeg;
+                    if (clamped > CAR_TRACK_MAX_TILT_CDEG) {
+                        clamped = CAR_TRACK_MAX_TILT_CDEG;
+                        track_output_saturated = true;
+                    } else if (clamped < -CAR_TRACK_MAX_TILT_CDEG) {
+                        clamped = -CAR_TRACK_MAX_TILT_CDEG;
+                        track_output_saturated = true;
+                    } else {
+                        track_output_saturated = false;
+                    }
+                    angle_cdeg = (int16_t)(clamped * CAR_TRACK_MOTOR_SIGN);
+                }
 
             } else {
-                /* Ball lost — reset integral and velocity. */
+                /* Ball lost */
                 track_error_integral = 0;
                 track_ball_velocity  = 0;
                 track_ball_was_lost  = true;
 
-                if (track_tilt_deg != 0) {
+                if (track_tilt_cdeg != 0) {
                     if (track_ball_lost_ms == 0U) {
                         track_ball_lost_ms = app_time_ms;
                     } else if ((uint32_t)(app_time_ms - track_ball_lost_ms)
                         >= 500U) {
-                        target_deg = 0;   /* return to horizontal */
+                        angle_cdeg = 0;
                         track_ball_lost_ms = 0U;
                         UartQueue("# BALL LOST; RETURNING TO LEVEL");
                     }
                 }
             }
 
-            if (target_deg != track_tilt_deg) {
-                /* Use relative rotation to avoid multi-turn wrap-around
-                   that occurs with AbsoluteRotate(0) after crossing a
-                   full revolution. */
-                /* Use blocking TX (same path as K2/K3) instead of
-                   queue_frame to avoid "ERR: Header not found". */
-                int16_t delta = (int16_t)(target_deg - track_tilt_deg);
-                Stepper_BlockingRelativeTest((int32_t)delta);
-                track_tilt_deg = target_deg;
+            /* ── 5. Send to stepper (convert cdeg → deg) ───── */
+            if (angle_cdeg != track_tilt_cdeg) {
+                int16_t delta_cdeg = (int16_t)(angle_cdeg - track_tilt_cdeg);
+                /* Round to nearest degree for the stepper */
+                int32_t delta_deg = (delta_cdeg >= 0)
+                    ? (delta_cdeg + 50) / 100
+                    : (delta_cdeg - 50) / 100;
+                if (delta_deg != 0) {
+                    Stepper_BlockingRelativeTest(delta_deg);
+                }
+                track_tilt_cdeg = angle_cdeg;
             }
             track_last_adjust_ms = app_time_ms;
         }
         /* Debug output: every 250ms when enabled, regardless of ball state. */
         if (track_debug && (app_time_ms % 250U) == 0U) {
             snprintf(tx_buffer, sizeof(tx_buffer),
-                "# DBG X=%d BALL=%u TILT=%d KP=%d KD=%d KI=%d VEL=%d INT=%ld ST=%u CAM=%u FR=%lu\r\n",
+                "# DBG X=%d BALL=%u TILT=%d KPP=%d KPV=%d KI=%d VEL=%d INT=%ld ST=%u CAM=%u FR=%lu\r\n",
                 Camera_GetBallX(),
                 Camera_HasBall() ? 1U : 0U,
-                track_tilt_deg,
-                track_kp_divisor,
-                track_kd_divisor,
+                track_tilt_cdeg,           /* centi-degrees */
+                track_kp_pos,
+                track_kp_vel,
                 track_ki_divisor,
                 track_ball_velocity,
                 (long)track_error_integral,
@@ -1624,7 +1634,7 @@ void CarApp_RunCycle(void)
          * loop stays in sync with the real motor position. */
 #if CAR_TRACK_ENABLE
         if (track_mode) {
-            track_tilt_deg = (int16_t)(track_tilt_deg + CAR_TRACK_CAL_ANGLE_DEG);
+            track_tilt_cdeg = (int16_t)(track_tilt_cdeg + CAR_TRACK_CAL_ANGLE_DEG * 100);
         }
 #endif
         Stepper_BlockingRelativeTest(CAR_TRACK_CAL_ANGLE_DEG);
@@ -1634,7 +1644,7 @@ void CarApp_RunCycle(void)
         /* Manual direction calibration: relative -1 degree. */
 #if CAR_TRACK_ENABLE
         if (track_mode) {
-            track_tilt_deg = (int16_t)(track_tilt_deg - CAR_TRACK_CAL_ANGLE_DEG);
+            track_tilt_cdeg = (int16_t)(track_tilt_cdeg - CAR_TRACK_CAL_ANGLE_DEG * 100);
         }
 #endif
         Stepper_BlockingRelativeTest(-CAR_TRACK_CAL_ANGLE_DEG);

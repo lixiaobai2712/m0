@@ -38,10 +38,10 @@ ROUND_DURATION_S = 5          # seconds of data per tuning round
 MAX_ROUNDS = 20               # safety limit
 SETTLE_S = 3                  # wait after param change before collecting
 
-# Parameter ranges (divisor form: smaller = stronger)
-KP_RANGE = (4, 200)
-KD_RANGE = (1, 100)
-KI_RANGE = (0, 500)
+# Parameter ranges (×100 gain form: larger = stronger)
+KP_RANGE = (1, 500)       # KP position gain ×100
+KD_RANGE = (1, 2000)      # KP velocity gain ×100
+KI_RANGE = (0, 500)       # I divisor (smaller = stronger)
 
 # Health thresholds
 GOOD_HEALTH = 75              # stop if health >= this for 3 consecutive rounds
@@ -135,8 +135,8 @@ class PIDTuner:
             for line in lines:
                 print(f"  {line}")
                 # Parse each field independently (order varies)
-                m_kp = re.search(r'KP=(\d+)', line)
-                m_kd = re.search(r'KD=(\d+)', line)
+                m_kp = re.search(r'KPP=(\d+)', line)
+                m_kd = re.search(r'KPV=(\d+)', line)
                 m_ki = re.search(r'KI=(\d+)', line)
                 m_mx = re.search(r'MX=(\d+)', line)
                 if m_kp and m_kd and m_ki:
@@ -155,12 +155,12 @@ class PIDTuner:
     def set_kp(self, val):
         val = max(val, KP_RANGE[0])  # never send 0 (division by zero on MCU)
         self.kp = val
-        self.send(f"TRACK KP {val}")
+        self.send(f"TRACK KPP {val}")
 
     def set_kd(self, val):
         val = max(val, 1)
         self.kd = val
-        self.send(f"TRACK KD {val}")
+        self.send(f"TRACK KPV {val}")
 
     def set_ki(self, val):
         val = max(val, 0)
@@ -242,7 +242,7 @@ class PIDTuner:
             if not line:
                 continue
 
-            # Parse: # DBG X=158 BALL=1 TILT=-10 KP=32 KD=4 KI=64 VEL=-2 INT=-4000 ...
+            # Parse: # DBG X=158 BALL=1 TILT=2000 KPP=50 KPV=300 KI=128 VEL=-2 INT=-4000 ...
             m = re.search(
                 r'X=(-?\d+).*BALL=(\d+).*TILT=(-?\d+).*VEL=(-?\d+).*INT=(-?\d+)',
                 line)
@@ -363,69 +363,58 @@ class PIDTuner:
     #   - Integral windup: KI accumulating too fast → increase KI divisor
 
     def suggest(self, metrics):
-        """Return list of (param, new_value, reason) tuples."""
+        """Return list of (param, new_value, reason) tuples.
+        New semantics: KP/KPV are GAINS (larger = stronger).
+        KI is still a divisor (smaller = stronger)."""
         m = metrics
         changes = []
 
-        # Priority 1: SEVERE oscillation → much stronger damping
+        # Priority 1: SEVERE oscillation → reduce KP, increase KPV
         if m['osc_score'] > 50:
-            new_kd = max(int(self.kd * 0.5), 1)   # half the divisor = 2x damping
-            changes.append(('KD', new_kd,
-                f"severe oscillation ({m['osc_score']:.0f}/100) → stronger damping"))
-            # Also back off KP a bit to reduce overshoot
-            if self.kp < 64:
-                new_kp = min(int(self.kp * 1.3), KP_RANGE[1])
-                changes.append(('KP', new_kp,
-                    f"reduce gain to match damping"))
-
-        # Priority 2: moderate oscillation → stronger damping
-        elif m['osc_score'] > 25:
-            new_kd = max(int(self.kd * 0.7), 1)
-            changes.append(('KD', new_kd,
-                f"moderate oscillation ({m['osc_score']:.0f}/100) → stronger damping"))
-
-        # Priority 3: saturated at max tilt + ball not centered →
-        #             response is too weak, make KP stronger (smaller divisor)
-        if m['sat_score'] > 60 and m['mean_abs'] > 20 and not changes:
             new_kp = max(int(self.kp * 0.7), KP_RANGE[0])
             changes.append(('KP', new_kp,
-                f"saturated {m['sat_score']:.0f}%, ball at {m['mean_abs']:.0f}px"
-                f" → stronger KP"))
+                f"severe oscillation ({m['osc_score']:.0f}/100)→weaker KP"))
+            new_kd = min(int(self.kd * 1.5), KD_RANGE[1])
+            changes.append(('KD', new_kd,
+                f"stronger velocity damping"))
 
-        # Priority 4: integral windup → slower integral (larger divisor)
-        if m['integral_winding'] and not changes:
-            new_ki = min(int(self.ki * 1.3), KI_RANGE[1])
-            changes.append(('KI', new_ki, "integral windup → slower I"))
+        # Priority 2: moderate oscillation → increase KPV
+        elif m['osc_score'] > 25:
+            new_kd = min(int(self.kd * 1.3), KD_RANGE[1])
+            changes.append(('KD', new_kd,
+                f"moderate oscillation→stronger damping"))
 
-        # Priority 5: steady error but no oscillation → stronger KP
-        if m['mean_abs'] > 30 and m['osc_score'] < 15 and not changes:
-            new_kp = max(int(self.kp * 0.8), KP_RANGE[0])
+        # Priority 3: saturated + ball not centered → increase KP
+        if m['sat_score'] > 60 and m['mean_abs'] > 20 and not changes:
+            new_kp = min(int(self.kp * 1.3), KP_RANGE[1])
             changes.append(('KP', new_kp,
-                f"steady error {m['mean_abs']:.0f}px → stronger KP"))
+                f"saturated {m['sat_score']:.0f}%,ball@{m['mean_abs']:.0f}px→stronger KP"))
 
-        # Safety: clamp values to valid ranges
+        # Priority 4: integral windup → larger KI divisor
+        if m['integral_winding'] and not changes:
+            new_ki = min(int(self.ki * 1.5), KI_RANGE[1])
+            changes.append(('KI', new_ki, "integral windup→slower I"))
+
+        # Priority 5: steady error, no oscillation → increase KP
+        if m['mean_abs'] > 30 and m['osc_score'] < 15 and not changes:
+            new_kp = min(int(self.kp * 1.2), KP_RANGE[1])
+            changes.append(('KP', new_kp,
+                f"steady error {m['mean_abs']:.0f}px→stronger KP"))
+
+        # Safety clamps
         clamped = []
         for p, v, r in changes:
-            if p == 'KP':
-                v = max(v, KP_RANGE[0])
-            elif p == 'KD':
-                v = max(v, 1)
-            elif p == 'KI':
-                v = max(v, 0)
+            if p == 'KP':   v = max(v, KP_RANGE[0])
+            elif p == 'KD': v = max(v, 1)
+            elif p == 'KI': v = max(v, 0)
             clamped.append((p, v, r))
         changes = clamped
 
-        # Filter: don't change if same as current
+        # No-ops filter
         changes = [(p, v, r) for p, v, r in changes
                    if (p == 'KP' and v != self.kp) or
                       (p == 'KD' and v != self.kd) or
                       (p == 'KI' and v != self.ki)]
-
-        if not changes and m['health'] < 50:
-            # Stuck: try a different approach — reset KI
-            if self.ki > 0 and m['sat_score'] > 80:
-                changes.append(('KI', 0,
-                    "stuck and saturated → disable integral temporarily"))
 
         return changes
 
@@ -522,7 +511,7 @@ class PIDTuner:
         print(f"Tuning complete.")
         print(f"Best:  KP={best_params[0]}  KD={best_params[1]}  KI={best_params[2]}"
               f"  (health={best_health:.1f})")
-        print(f"To save: TRACK KP {best_params[0]}; TRACK KD {best_params[1]};"
+        print(f"To save: TRACK KPP{best_params[0]}; TRACK KPV {best_params[1]};"
               f" TRACK KI {best_params[2]}")
         print(f"{'='*60}")
 

@@ -14,35 +14,59 @@
 #define CAR_CAMERA_KP_DIVISOR       8L
 #define CAR_CAMERA_MAX_CORRECTION   20
 
-/* Stepper-based ball balancing. The motor's internal encoder closes the
-   angle loop; the MCU maps the predicted ball position to an absolute tilt.
+/* ── Ball-on-plate balancing (TRACK mode) ─────────────────────────────
+   Cascade PD controller:  position outer loop → velocity inner loop.
 
-   PD + I control with soft deadband and adaptive KP.
+   Units (all internal math uses fixed-point ×100 for precision):
+     position  : camera pixels (calibrate PX_PER_CM for real-world)
+     velocity  : px / control-period  (LPF-smoothed)
+     angle     : centi-degrees (2000 = 20.00°)
+     integral  : px·cycles  (clamped)
 
-   target_deg = MOTOR_SIGN * (P + D + I) / 100
-     P = ball_x * 100 / kp_divisor          — proportional (position error)
-     D = ball_velocity * 100 / kd_divisor   — derivative (damping)
-     I = error_integral * 100 / ki_divisor  — integral (steady-state correction)
+   Control law:
+     desired_vel  = KP_POS * error                    (position → velocity)
+     vel_error    = desired_vel - filtered_velocity
+     angle_cmd    = (KP_VEL * vel_error) + I_term     (velocity → angle)
+     angle_cmd    = clamp(angle_cmd, ±MAX_TILT_cdeg)
+     angle_cmd   *= MOTOR_SIGN                        (flip if needed)
 
-   The sign convention: MOTOR_SIGN = -1 when a positive stepper angle
-   lowers the free end of the rod.  Positive camera X = ball towards
-   the free end. */
+   D term (velocity damping) is implicit in KP_VEL:
+     If the ball is moving toward center, vel_error is small and tilt backs off.
+     If the ball is moving away, vel_error is large and tilt increases.
+
+   Anti-windup:  integral only accumulates when output is NOT saturated,
+     OR when the integral would pull the output back from saturation.
+
+   Sign convention: MOTOR_SIGN = -1 when a positive stepper angle
+   lowers the free end.  Positive camera X = ball toward free end. */
 #define CAR_TRACK_ENABLE            1U
-#define CAR_TRACK_DEADBAND           4      /* soft deadband: linear taper below this */
-#define CAR_TRACK_KP_DIVISOR        32L    /* P gain divisor (px→deg, smaller=stronger) */
-#define CAR_TRACK_KD_DIVISOR        4L     /* D gain divisor (vel px/cycle→deg damping) */
-#define CAR_TRACK_KI_DIVISOR        64L    /* I gain divisor (0 = disable integral) */
-#define CAR_TRACK_INTEGRAL_MAX      4000L  /* anti-windup: max integral accumulator */
-#define CAR_TRACK_KD_FILTER_SHIFT   2      /* velocity LPF: 1/4 new + 3/4 old */
-#define CAR_TRACK_ADAPTIVE_FAST_ZONE 96    /* |x| above this: KP boosted +30% */
-#define CAR_TRACK_ADAPTIVE_SLOW_ZONE 24    /* |x| below this: KP reduced -30% */
-#define CAR_TRACK_MAX_TILT_DEG       20     /* hard limit, mechanical max +47° */
-#define CAR_TRACK_UPDATE_MS         20U    /* control loop period */
+
+/* ── Calibration ──────────────────────────────────────────────────── */
+#define CAR_TRACK_PX_PER_CM         25      /* camera pixels per cm (tune this!) */
+#define CAR_TRACK_DEADBAND_CM       2       /* deadband in mm (×10 for cm) → 0.2 cm */
+#define CAR_TRACK_DEADBAND_PX       ((CAR_TRACK_DEADBAND_CM * CAR_TRACK_PX_PER_CM + 5) / 10)
+
+/* ── Cascade PD gains (fixed-point ×100) ──────────────────────────── */
+/* Position outer loop: desired velocity [px/cycle] = KP_POS * error [px] / 100 */
+#define CAR_TRACK_KP_POS            50L     /* pos→vel gain (50/100 = 0.5) */
+/* Velocity inner loop: angle [cdeg] = KP_VEL * vel_error [px/cycle] / 100 */
+#define CAR_TRACK_KP_VEL            300L    /* vel→angle gain (300/100 = 3.0 cdeg per px/cycle) */
+
+/* ── Integral (slow, for static error only) ────────────────────────── */
+#define CAR_TRACK_KI_DIVISOR        128L    /* I gain divisor (0 = disable) */
+#define CAR_TRACK_INTEGRAL_MAX      2000L   /* anti-windup clamp (px·cycles) */
+
+/* ── Velocity low-pass filter ──────────────────────────────────────── */
+#define CAR_TRACK_VEL_FILTER_SHIFT  2       /* 1/4 new + 3/4 old */
+
+/* ── Limits ────────────────────────────────────────────────────────── */
+#define CAR_TRACK_MAX_TILT_CDEG     2000    /* ±20.00° (mechanical max +47°) */
+#define CAR_TRACK_UPDATE_MS         20U     /* control loop period */
 #define CAR_TRACK_ORIGIN_DELAY_MS   120U
 #define CAR_TRACK_START_DELAY_MS    120U
-/* Set to -1 if a positive absolute angle lowers the rod's free end. */
+
+/* ── Motor sign ────────────────────────────────────────────────────── */
 #define CAR_TRACK_MOTOR_SIGN        -1
-#define CAR_TRACK_MAX_SAFE_ANGLE_DEG 10
 #define CAR_TRACK_CAL_ANGLE_DEG       1
 
 /* Oval course: steering comes only from the infrared line sensors. */
