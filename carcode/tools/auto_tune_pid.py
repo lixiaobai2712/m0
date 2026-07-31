@@ -203,14 +203,16 @@ class PIDTuner:
         time.sleep(0.3)
 
     def enable_debug(self):
-        """Toggle TRACK DEBUG ON and parse the output."""
-        self.send("TRACK DEBUG")
-        # Toggle twice to ensure ON if it was OFF
-        lines = self.send("TRACK DEBUG")
-        for line in lines:
-            if "DEBUG ON" in line:
-                return True
-        # Might be ON already from first toggle
+        """Ensure TRACK DEBUG is ON. Toggle until confirmed."""
+        for attempt in range(4):
+            lines = self.send("TRACK DEBUG")
+            for line in lines:
+                print(f"  {line}")
+                if "DEBUG ON" in line:
+                    return True
+            time.sleep(0.2)
+        # If we can't confirm, assume it's on (toggle worked)
+        print("  (debug state unknown, assuming ON)")
         return True
 
     # ─── Data collection ────────────────────────────────────────────────
@@ -219,34 +221,50 @@ class PIDTuner:
         """Collect ball X position data for `duration_s` seconds.
         Parses '# DBG X=...' lines from serial."""
         data = []
+        other_lines = []
         deadline = time.time() + duration_s
         print(f"  Collecting {duration_s}s of data...", end='', flush=True)
 
+        # Use non-blocking read with short timeout
+        self.ser.timeout = 0.1
         while time.time() < deadline:
-            if self.ser.in_waiting:
-                try:
-                    raw = self.ser.readline()
-                    line = raw.decode('utf-8', errors='replace').strip()
-                except Exception:
+            try:
+                raw = self.ser.readline()
+                if not raw:
                     continue
+                line = raw.decode('utf-8', errors='replace').strip()
+            except Exception:
+                continue
 
-                # Parse: # DBG X=158 BALL=1 TILT=-10 KP=32 KD=4 KI=64 VEL=-2 INT=-4000 ...
-                m = re.search(
-                    r'X=(-?\d+).*BALL=(\d+).*TILT=(-?\d+).*VEL=(-?\d+).*INT=(-?\d+)',
-                    line)
-                if m:
-                    ball = int(m.group(2))
-                    if ball:
-                        data.append({
-                            'x': int(m.group(1)),
-                            'tilt': int(m.group(3)),
-                            'vel': int(m.group(4)),
-                            'integral': int(m.group(5)),
-                        })
-            else:
-                time.sleep(0.01)
+            if not line:
+                continue
 
-        print(f" {len(data)} samples")
+            # Parse: # DBG X=158 BALL=1 TILT=-10 KP=32 KD=4 KI=64 VEL=-2 INT=-4000 ...
+            m = re.search(
+                r'X=(-?\d+).*BALL=(\d+).*TILT=(-?\d+).*VEL=(-?\d+).*INT=(-?\d+)',
+                line)
+            if m:
+                ball = int(m.group(2))
+                if ball:
+                    data.append({
+                        'x': int(m.group(1)),
+                        'tilt': int(m.group(3)),
+                        'vel': int(m.group(4)),
+                        'integral': int(m.group(5)),
+                    })
+            elif line.startswith('#') or line.startswith('$'):
+                other_lines.append(line)
+
+        # Restore timeout
+        self.ser.timeout = 0.5
+        print(f" {len(data)} samples", end='')
+        if data:
+            xs = [d['x'] for d in data]
+            print(f"  X:[{min(xs)}..{max(xs)}]")
+        elif other_lines:
+            print(f"  (other lines: {len(other_lines)}, e.g. {other_lines[0][:60]})")
+        else:
+            print("  (no data at all — is TRACK DEBUG ON?)")
         self.round_data = data
         return data
 
