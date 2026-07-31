@@ -36,7 +36,8 @@
 #define CAR_TRACK_KD_FILTER_SHIFT   2      /* velocity LPF: 1/4 new + 3/4 old */
 #define CAR_TRACK_ADAPTIVE_FAST_ZONE 96    /* |x| above this: KP boosted +30% */
 #define CAR_TRACK_ADAPTIVE_SLOW_ZONE 24    /* |x| below this: KP reduced -30% */
-#define CAR_TRACK_MAX_TILT_DEG       10
+#define CAR_TRACK_MAX_TILT_LIMIT     20     /* hard upper limit, safety */
+#define CAR_TRACK_MAX_TILT_DEFAULT   10     /* default after init */
 #define CAR_TRACK_UPDATE_MS         40U    /* control loop period (was 80ms) */
 #define CAR_TRACK_ORIGIN_DELAY_MS   120U
 #define CAR_TRACK_START_DELAY_MS    120U

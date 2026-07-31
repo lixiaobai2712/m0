@@ -93,6 +93,7 @@ static int16_t track_tilt_deg;
 static int16_t track_kp_divisor;
 static bool    track_debug;
 static uint32_t track_ball_lost_ms;
+static int16_t track_max_tilt_deg;
 static int16_t track_kd_divisor;
 static int16_t track_ki_divisor;
 static int16_t track_prev_ball_x;
@@ -1044,13 +1045,14 @@ static void ProcessCommand(void)
     } else if (strcmp(rx_line, "TRACK?") == 0) {
 #if CAR_TRACK_ENABLE
         snprintf(tx_buffer, sizeof(tx_buffer),
-            "# TRACK MODE=%u ST=%u ONLINE=%u BALL=%u X=%d TILT=%d KP=%d KD=%d KI=%d VEL=%d INT=%ld CD=%lu\r\n",
+            "# TRACK MODE=%u ST=%u ONLINE=%u BALL=%u X=%d TILT=%d MX=%d KP=%d KD=%d KI=%d VEL=%d INT=%ld CD=%lu\r\n",
             track_mode ? 1U : 0U,
             track_start_state,
             Camera_IsOnline(app_time_ms) ? 1U : 0U,
             Camera_HasBall() ? 1U : 0U,
             Camera_GetBallX(),
             track_tilt_deg,
+            track_max_tilt_deg,
             track_kp_divisor,
             track_kd_divisor,
             track_ki_divisor,
@@ -1122,12 +1124,31 @@ static void ProcessCommand(void)
 #else
         UartQueue("# TRACK DISABLED IN CONFIG");
 #endif
+    } else if (strncmp(rx_line, "TRACK MAXTILT ", 14) == 0) {
+#if CAR_TRACK_ENABLE
+        char *end;
+        long val = strtol(&rx_line[14], &end, 10);
+        if (end == &rx_line[14] || *end != '\0' || val < 1 || val > CAR_TRACK_MAX_TILT_LIMIT) {
+            snprintf(tx_buffer, sizeof(tx_buffer),
+                "# TRACK MAXTILT ERROR RANGE 1..%d\r\n", CAR_TRACK_MAX_TILT_LIMIT);
+            tx_length = (uint8_t)strlen(tx_buffer);
+            tx_index = 0U;
+        } else {
+            track_max_tilt_deg = (int16_t)val;
+            snprintf(tx_buffer, sizeof(tx_buffer),
+                "# TRACK MAXTILT SET TO %ld\r\n", val);
+            tx_length = (uint8_t)strlen(tx_buffer);
+            tx_index = 0U;
+        }
+#else
+        UartQueue("# TRACK DISABLED IN CONFIG");
+#endif
     } else if (strcmp(rx_line, "TRACK SAVE") == 0) {
 #if CAR_TRACK_ENABLE
         snprintf(tx_buffer, sizeof(tx_buffer),
             "# TRACK SAVE: KP=%d KD=%d KI=%d MAXTILT=%d DB=%d UPD=%lu\r\n",
             track_kp_divisor, track_kd_divisor, track_ki_divisor,
-            CAR_TRACK_MAX_TILT_DEG, CAR_TRACK_DEADBAND,
+            track_max_tilt_deg, CAR_TRACK_DEADBAND,
             (unsigned long)CAR_TRACK_UPDATE_MS);
         tx_length = (uint8_t)strlen(tx_buffer);
         tx_index = 0U;
@@ -1255,7 +1276,7 @@ static void QueueTelemetry(void)
             track_ki_divisor,
             track_ball_velocity,
             (long)track_error_integral,
-            CAR_TRACK_MAX_TILT_DEG,
+            track_max_tilt_deg,
             track_start_state,
             Camera_IsOnline(app_time_ms) ? 1U : 0U,
             track_mode ? 1U : 0U);
@@ -1362,6 +1383,7 @@ void CarApp_Init(void)
     track_kp_divisor = CAR_TRACK_KP_DIVISOR;
     track_debug = false;
     track_ball_lost_ms = 0U;
+    track_max_tilt_deg = CAR_TRACK_MAX_TILT_DEFAULT;
     track_kd_divisor   = CAR_TRACK_KD_DIVISOR;
     track_ki_divisor   = CAR_TRACK_KI_DIVISOR;
     track_prev_ball_x  = 0;
@@ -1502,10 +1524,10 @@ void CarApp_RunCycle(void)
 
                 /* ---- 6. Apply motor sign and clamp ---- */
                 target_deg = (int16_t)(target_deg * CAR_TRACK_MOTOR_SIGN);
-                if (target_deg > CAR_TRACK_MAX_TILT_DEG)
-                    target_deg = CAR_TRACK_MAX_TILT_DEG;
-                else if (target_deg < -CAR_TRACK_MAX_TILT_DEG)
-                    target_deg = -CAR_TRACK_MAX_TILT_DEG;
+                if (target_deg > track_max_tilt_deg)
+                    target_deg = track_max_tilt_deg;
+                else if (target_deg < -track_max_tilt_deg)
+                    target_deg = -track_max_tilt_deg;
 
             } else {
                 /* Ball lost — reset integral and velocity. */
