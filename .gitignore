@@ -1,0 +1,34 @@
+# Build outputs
+carcode/Debug/
+Debug/
+*.o
+*.d
+*.d_raw
+*.map
+*.out
+*.hex
+*.bin
+*.elf
+
+# IDE
+.settings/
+.ccsproject
+.cproject
+.project
+.vscode/
+*.launch
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Misc
+*.bak
+*.tmp

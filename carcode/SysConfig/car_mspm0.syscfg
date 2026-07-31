@@ -1,0 +1,132 @@
+/** MSPM0G3507 Tianmengxing line-following car configuration. */
+//@cliArgs --device "MSPM0G350X" --package "LQFP-64(PM)" --part "Default"
+//@v2CliArgs --device "MSPM0G3507" --package "LQFP-64(PM)"
+
+const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const GPIO1  = GPIO.addInstance();
+const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
+const PWM1   = PWM.addInstance();
+const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
+const UART1  = UART.addInstance();
+const UART2  = UART.addInstance();
+const UART3  = UART.addInstance();
+const UART4  = UART.addInstance();
+const I2C    = scripting.addModule("/ti/driverlib/I2C", {}, false);
+const I2C1   = I2C.addInstance();
+const QEI    = scripting.addModule("/ti/driverlib/QEI", {}, false);
+const QEI1   = QEI.addInstance();
+const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
+
+SYSCTL.forceDefaultClkConfig = true;
+SYSCTL.clockTreeEn           = true;
+
+GPIO1.$name = "CAR_GPIO";
+GPIO1.associatedPins.create(11);
+
+GPIO1.associatedPins[0].$name            = "START_KEY";
+GPIO1.associatedPins[0].assignedPort     = "PORTB";
+GPIO1.associatedPins[0].assignedPin      = "21";
+GPIO1.associatedPins[0].pin.$assign      = "PB21";
+GPIO1.associatedPins[0].direction        = "INPUT";
+GPIO1.associatedPins[0].internalResistor = "PULL_UP";
+
+const motorPins = [
+    ["AIN1", "PORTB", "17"],
+    ["AIN2", "PORTB", "19"],
+    ["BIN1", "PORTA", "16"],
+    ["BIN2", "PORTB", "24"]
+];
+for (let i = 0; i < motorPins.length; i++) {
+    const pin = GPIO1.associatedPins[i + 1];
+    pin.$name        = motorPins[i][0];
+    pin.assignedPort = motorPins[i][1];
+    pin.assignedPin  = motorPins[i][2];
+    pin.pin.$assign  = motorPins[i][1] === "PORTA" ?
+        "PA" + motorPins[i][2] : "PB" + motorPins[i][2];
+    pin.direction    = "OUTPUT";
+    pin.initialValue = "CLEARED";
+}
+
+GPIO1.associatedPins[5].$name        = "BUZZER";
+GPIO1.associatedPins[5].assignedPort = "PORTA";
+GPIO1.associatedPins[5].assignedPin  = "7";
+GPIO1.associatedPins[5].pin.$assign  = "PA7";
+GPIO1.associatedPins[5].direction    = "OUTPUT";
+/* Active-low buzzer: high is the safe, silent startup level. */
+GPIO1.associatedPins[5].initialValue = "SET";
+
+GPIO1.associatedPins[6].$name        = "LINE_LED";
+GPIO1.associatedPins[6].assignedPort = "PORTB";
+GPIO1.associatedPins[6].assignedPin  = "22";
+GPIO1.associatedPins[6].pin.$assign  = "PB22";
+GPIO1.associatedPins[6].direction    = "OUTPUT";
+GPIO1.associatedPins[6].initialValue = "CLEARED";
+
+/* K1-K4 buttons: active-low inputs with internal pull-ups.
+   IOMUX indices verified for MSPM0G3507 LQFP-64:
+   PB13=pinCM30  PB23=pinCM51  PB26=pinCM32  PB27=pinCM33 */
+const buttonPins = [
+    ["KEY_K1", "PORTB", "13"],
+    ["KEY_K2", "PORTB", "23"],
+    ["KEY_K3", "PORTB", "26"],
+    ["KEY_K4", "PORTB", "27"]
+];
+for (let i = 0; i < buttonPins.length; i++) {
+    const pin = GPIO1.associatedPins[i + 7];
+    pin.$name            = buttonPins[i][0];
+    pin.assignedPort     = buttonPins[i][1];
+    pin.assignedPin      = buttonPins[i][2];
+    pin.pin.$assign      = "PB" + buttonPins[i][2];
+    pin.direction        = "INPUT";
+    pin.internalResistor = "PULL_UP";
+}
+
+PWM1.$name                      = "MOTOR_PWM";
+PWM1.peripheral.$assign         = "TIMG0";
+PWM1.ccIndex                    = [0, 1];
+PWM1.timerCount                 = 1600;
+PWM1.timerStartTimer            = true;
+PWM1.peripheral.ccp0Pin.$assign = "PA12";
+PWM1.peripheral.ccp1Pin.$assign = "PA13";
+PWM1.PWM_CHANNEL_0.$name        = "MOTOR_PWMA";
+PWM1.PWM_CHANNEL_0.dutyCycle    = 0;
+PWM1.PWM_CHANNEL_1.$name        = "MOTOR_PWMB";
+PWM1.PWM_CHANNEL_1.dutyCycle    = 0;
+
+UART1.$name                    = "TUNER_UART";
+UART1.peripheral.$assign       = "UART1";
+UART1.targetBaudRate           = 115200;
+UART1.peripheral.txPin.$assign = "PB6";
+UART1.peripheral.rxPin.$assign = "PB7";
+
+UART2.$name                    = "GYRO_UART";
+UART2.peripheral.$assign       = "UART0";
+UART2.targetBaudRate           = 115200;
+UART2.peripheral.txPin.$assign = "PA0";
+UART2.peripheral.rxPin.$assign = "PA1";
+
+UART3.$name                    = "STEPPER_UART";
+UART3.peripheral.$assign       = "UART2";
+UART3.targetBaudRate           = 115200;
+UART3.peripheral.txPin.$assign = "PA23";
+UART3.peripheral.rxPin.$assign = "PA24";
+
+UART4.$name                    = "CAMERA_UART";
+UART4.peripheral.$assign       = "UART3";
+UART4.targetBaudRate           = 115200;
+UART4.peripheral.txPin.$assign = "PB2";
+UART4.peripheral.rxPin.$assign = "PB3";
+
+I2C1.$name                     = "OLED_I2C";
+I2C1.basicEnableController     = true;
+I2C1.basicControllerBusSpeed   = 400000;
+I2C1.advAnalogGlitchFilter     = "DISABLED";
+I2C1.advControllerTXFIFOTRIG   = "BYTES_1";
+I2C1.peripheral.$assign        = "I2C0";
+I2C1.peripheral.sclPin.$assign = "PA31";
+I2C1.peripheral.sdaPin.$assign = "PA28";
+
+QEI1.$name                      = "ENCODER_M2";
+QEI1.peripheral.$assign         = "TIMG8";
+QEI1.peripheral.ccp0Pin.$assign = "PA26";
+QEI1.peripheral.ccp1Pin.$assign = "PA27";
